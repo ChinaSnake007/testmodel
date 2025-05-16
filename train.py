@@ -2,13 +2,17 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
 from data_utils import create_dataloader
 from model import TrajectoryDiffusionModel
+import torch
 
 def main():
+    # 设置Tensor Core优化
+    torch.set_float32_matmul_precision('medium')
+    
     # 创建数据加载器
     train_loader = create_dataloader(
-        csv_path="trajectories.csv",
+        csv_path="trajectories_sample.csv",
         batch_size=32,
-        max_length=30,
+        max_length=32,
         num_ids=3953,
         miss_ratio=0.3
     )
@@ -35,10 +39,11 @@ def main():
     # 创建训练器
     trainer = pl.Trainer(
         max_epochs=100,
-        accelerator="gpu" if pl.utilities.device.is_cuda_available() else "cpu",
+        accelerator="gpu" if torch.cuda.is_available() else "cpu",
         callbacks=[checkpoint_callback],
         gradient_clip_val=1.0,
-        log_every_n_steps=50
+        log_every_n_steps=50,
+        logger=False  # 暂时禁用logger
     )
     
     # 开始训练

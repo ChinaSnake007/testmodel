@@ -30,7 +30,7 @@ def process_trajectories():
             trajectory = [grid_id_dict[int(grid_id)] for grid_id in sorted_group['grid_id']]
             
             # 只保留长度在8-30之间的轨迹
-            if 8 <= len(trajectory) <= 30:
+            if 8 <= len(trajectory) <= 32:
                 all_trajectories.append({
                     'trajectory': trajectory
                 })

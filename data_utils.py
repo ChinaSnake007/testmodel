@@ -6,7 +6,7 @@ from typing import List, Tuple
 from tqdm import tqdm
 
 class TrajectoryDataset(Dataset):
-    def __init__(self, csv_path: str, max_length: int = 30, num_ids: int = 3953, miss_ratio: float = 0.3):
+    def __init__(self, csv_path: str, max_length: int = 32, num_ids: int = 3953, miss_ratio: float = 0.3):
         self.max_length = max_length
         self.num_ids = num_ids
         self.miss_ratio = miss_ratio
@@ -51,7 +51,7 @@ class TrajectoryDataset(Dataset):
         
         return original_ids, x, masked_ids, mask
 
-def create_dataloader(csv_path: str, batch_size: int = 32, max_length: int = 30, num_ids: int = 3953, miss_ratio: float = 0.3):
+def create_dataloader(csv_path: str, batch_size: int = 32, max_length: int = 32, num_ids: int = 3953, miss_ratio: float = 0.3):
     dataset = TrajectoryDataset(csv_path, max_length, num_ids, miss_ratio)
     return DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4)
 
@@ -61,7 +61,7 @@ def main():
     dataloader = create_dataloader(
         csv_path='trajectories_sample.csv',
         batch_size=4,
-        max_length=30,
+        max_length=32,
         num_ids=3953,
         miss_ratio=0.3
     )
