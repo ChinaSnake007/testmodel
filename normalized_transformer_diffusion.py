@@ -7,6 +7,14 @@ import numpy as np
 from tqdm import tqdm
 import math
 
+"""
+模型：Transformer
+对ID做最大值归一化
+id条件嵌入，使用复杂的transformer encoder进行编码嵌入
+
+"""
+
+
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model: int, max_len: int = 5000):
         super().__init__()

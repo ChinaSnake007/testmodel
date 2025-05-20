@@ -7,6 +7,13 @@ import numpy as np
 from tqdm import tqdm
 import math
 
+"""
+模型：Transformer
+对ID嵌入后的向量进行加噪去噪处理
+id条件嵌入，使用复杂的transformer encoder进行编码嵌入
+id嵌入表示和扩散模型一起训练
+"""
+
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model: int, max_len: int = 5000):
         super().__init__()

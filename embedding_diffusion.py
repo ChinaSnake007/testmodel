@@ -7,6 +7,17 @@ import numpy as np
 from tqdm import tqdm
 import math
 
+"""
+模型：UNet1D
+数据：
+    原始数据：ID序列
+    条件数据：ID序列
+方案：
+    id嵌入和扩散模型一起训练。
+    对嵌入后的id做加噪、去噪处理
+
+"""
+
 class ConvBlock1D(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, condition_dim: int, stride: int = 1):
         super().__init__()

@@ -7,6 +7,18 @@ import numpy as np
 from tqdm import tqdm
 import math
 import random
+"""
+模型：两阶段Transformer结构
+    第一阶段：PretrainIDEmbedding，做id的嵌入学习
+    第二阶段：TransformerDiffusion，
+输入：
+    1. 原始ID嵌入
+    2. 条件ID嵌入
+    3. 时间步长
+输出：
+    1. 预测ID
+"""
+
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model: int, max_len: int = 5000):

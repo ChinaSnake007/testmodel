@@ -7,6 +7,16 @@ import numpy as np
 from tqdm import tqdm
 import math
 
+"""
+模型：UNet1D
+数据：
+    原始数据：ID序列
+    条件数据：ID序列
+方案：
+    用one-hot向量表示id序列，对one-hot向量做加噪、去噪处理
+"""
+
+
 class ConvBlock1D(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, condition_dim: int, stride: int = 1):
         super().__init__()

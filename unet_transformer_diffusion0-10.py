@@ -7,15 +7,16 @@ from diffusers import DDPMScheduler
 
 """
 模型：Unet结构+残差块和注意力
-将条件信息逐元素加入到x中
 输入：
-    1. 原始ID除以num_ids+1
+    1. 原始ID除以num_ids+1，再乘以10，扩大范围
     2. 条件ID除以num_ids+1
     3. 时间步长
 输出：
     1. 预测噪声
     2. 预测ID
 """
+
+
 def get_timestep_embedding(timesteps, embedding_dim):
     """时间步编码"""
     assert len(timesteps.shape) == 1
@@ -139,21 +140,37 @@ class AttnBlock(nn.Module):
         return x + h_
 
 class IDConditionModel(nn.Module):
-    def __init__(self, num_ids, embedding_dim):
+    def __init__(self, num_ids, embedding_dim, use_transformer=True):
         super().__init__()
         self.id_embedding = nn.Embedding(num_ids + 2, embedding_dim)  # +2 for padding
-        self.pos_encoder = nn.TransformerEncoderLayer(
-            d_model=embedding_dim,
-            nhead=8,
-            dim_feedforward=embedding_dim * 4,
-            batch_first=True
-        )
-        self.transformer = nn.TransformerEncoder(self.pos_encoder, num_layers=3)
+        self.use_transformer = use_transformer
+        
+        if use_transformer:
+            self.pos_encoder = nn.TransformerEncoderLayer(
+                d_model=embedding_dim,
+                nhead=8,
+                dim_feedforward=embedding_dim * 4,
+                batch_first=True
+            )
+            self.transformer = nn.TransformerEncoder(self.pos_encoder, num_layers=3)
+        else:
+            # 使用简单的线性层替代Transformer
+            self.linear_layers = nn.Sequential(
+                nn.Linear(embedding_dim, embedding_dim * 2),
+                nn.SiLU(),
+                nn.Linear(embedding_dim * 2, embedding_dim)
+            )
+            
         self.output_proj = nn.Linear(embedding_dim, embedding_dim)
 
     def forward(self, ids):
         x = self.id_embedding(ids)
-        x = self.transformer(x)
+        
+        if self.use_transformer:
+            x = self.transformer(x)
+        else:
+            x = self.linear_layers(x)
+            
         x = self.output_proj(x)
         return x.permute(0, 2, 1)  # [B, embed_dim, seq_len]
 
@@ -190,7 +207,7 @@ class UNetTransformerDiffusion(pl.LightningModule):
         })
         
         # 条件编码
-        self.cond_encoder = IDConditionModel(num_ids, self.ch * 4)
+        self.cond_encoder = IDConditionModel(num_ids, self.ch * 4, use_transformer=True)
         
         # 输入投影
         self.conv_in = nn.Conv1d(1, self.ch, kernel_size=3, stride=1, padding=1)
@@ -277,7 +294,9 @@ class UNetTransformerDiffusion(pl.LightningModule):
         
         # 条件编码
         cond_emb = self.cond_encoder(cond)
+        # 将条件信息依次加入序列中
         temb = temb + cond_emb.mean(dim=2)  # 添加条件信息
+        # temb = temb.unsqueeze(2) + cond_emb
         
         # 下采样路径
         hs = [self.conv_in(x)]
@@ -312,13 +331,18 @@ class UNetTransformerDiffusion(pl.LightningModule):
         return h
     
     def normalize_ids(self, ids):
+        # 将ID归一化到[0,1]范围
         return ids.float() / (self.num_ids + 1)
     
     def denormalize_ids(self, normalized_ids):
+        # 从[0,1]范围恢复到原始ID
         scaled_ids = normalized_ids * (self.num_ids + 1)
+        # 对缩放后的ID值进行四舍五入,将连续值转换为离散的整数ID
         rounded_ids = torch.round(scaled_ids)
+        # 将四舍五入后的ID值转换为长整型,并限制在合法范围内(0到num_ids+1)
         return rounded_ids.long().clamp(0, self.num_ids + 1)
     
+
     def training_step(self, batch, batch_idx):
         original_ids, masked_ids = batch
         
@@ -367,14 +391,14 @@ class UNetTransformerDiffusion(pl.LightningModule):
 def main():
     # 模型参数
     model_config = {
-        'num_ids': 25,
-        'seq_length': 32,
+        'num_ids': 20,
+        'seq_length': 16,
         'ch': 64,
         'ch_mult': (1, 2, 4, 8),
         'num_res_blocks': 2,
         'dropout': 0.1,
-        'learning_rate': 1e-4,
-        'num_timesteps': 1000
+        'learning_rate': 1e-2,
+        'num_timesteps': 500
     }
     
     # 训练参数
@@ -412,10 +436,14 @@ def main():
         
         # 反向传播
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        # # 梯度裁剪,防止梯度爆炸,最大范数设为1.0
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
+        # 记录最高准确率
+        if not hasattr(model, 'best_accuracy'):
+            model.best_accuracy = 0.0
         
-        if (epoch + 1) % 50 == 0:
+        if (epoch + 1) % 20 == 0:
             print(f"Epoch [{epoch+1}/{train_config['num_epochs']}], Loss: {loss.item():.6f}")
             
             # 生成样本
@@ -427,10 +455,14 @@ def main():
                 correct_count = (generated_ids == original_ids).sum().item()
                 total_ids = original_ids.numel()
                 accuracy = correct_count / total_ids
-                print(f"准确率: {accuracy:.4f}")
+                
+                # 更新并打印最高准确率
+                if accuracy > model.best_accuracy:
+                    model.best_accuracy = accuracy
+                print(f"当前准确率: {accuracy:.4f}, 最高准确率: {model.best_accuracy:.4f}")
                 
                 # 打印样本对比
-                if (epoch + 1) % 200 == 0:
+                if (epoch + 1) % 20 == 0:
                     print("\n样本对比 (前3个序列):")
                     print("原始ID:")
                     print(original_ids[:3].cpu().numpy())
