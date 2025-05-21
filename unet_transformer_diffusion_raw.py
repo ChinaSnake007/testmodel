@@ -17,7 +17,7 @@ plt.rcParams['axes.unicode_minus'] = False  # 用来正常显示负号
 模型：Unet结构+残差块（提取特征用一维卷积）和注意力
 将条件信息，以序列的方式和x相加
 输入：
-    1. 原始ID序列
+    1. x0原始ID序列
     2. 条件ID
     3. 时间步长
 
