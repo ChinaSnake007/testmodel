@@ -270,7 +270,7 @@ class NormalizedTrajectoryTransformerDiffusion(pl.LightningModule):
         x = torch.randn((batch_size, seq_len, 1), device=device)
         
         # 逐步去噪
-        for t in tqdm(self.noise_scheduler.timesteps):
+        for t in self.noise_scheduler.timesteps:
             timesteps = torch.full((batch_size,), t, device=device, dtype=torch.float32)
             
             noise_pred = self(x, timesteps, masked_ids, mask)

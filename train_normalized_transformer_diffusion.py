@@ -132,7 +132,7 @@ def main():
     
     # 模型参数
     model_config = {
-        "num_ids": 50,  # 根据你的数据集修改
+        "num_ids": args.num_ids,  # 根据你的数据集修改
         "embedding_dim": 256,
         "num_layers": 6,
         "learning_rate": 1e-4,
