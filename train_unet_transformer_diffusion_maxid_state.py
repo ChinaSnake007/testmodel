@@ -82,7 +82,7 @@ def evaluate_model(model, val_loader, device):
             predictions = model.sample(masked_ids)
             
             # 计算准确率
-            accuracy, masked_accuracy = calculate_accuracy(predictions, original_ids)
+            accuracy, masked_accuracy = calculate_accuracy(predictions, original_ids, mask)
             
             total_accuracy += accuracy
             if masked_accuracy is not None:
@@ -91,8 +91,8 @@ def evaluate_model(model, val_loader, device):
             
             # 更新进度条显示当前batch的准确率
             pbar.set_postfix({
-                'batch_acc': f'{accuracy:.4f}',
-                'batch_mask_acc': f'{masked_accuracy:.4f}' if masked_accuracy is not None else 'N/A'
+                '整体准确率': f'{accuracy:.4f}',
+                '掩码准确率': f'{masked_accuracy:.4f}' if masked_accuracy is not None else 'N/A'
             })
     
     avg_accuracy = total_accuracy / num_batches
@@ -194,20 +194,20 @@ def main():
         print(f"\nEpoch {epoch+1}/{args.num_epochs}")
         print(f"Average Loss: {avg_loss:.6f}")
         
-        if (epoch + 1) % 5 == 0:
+        if (epoch + 1) % 1 == 0:
             accuracy, masked_accuracy = evaluate_model(model, val_loader, device)
             accuracies.append(accuracy)
             if masked_accuracy is not None:
                 masked_accuracies.append(masked_accuracy)
             
-            print(f"Accuracy: {accuracy:.4f}")
+            print(f"整体准确率: {accuracy:.4f}")
             if masked_accuracy is not None:
-                print(f"Masked Accuracy: {masked_accuracy:.4f}")
+                print(f"掩码位置准确率: {masked_accuracy:.4f}")
     
     # 测试模型
     print("\n=== 模型测试 ===")
     test_accuracy, test_masked_accuracy = evaluate_model(model, test_loader, device)
-    print(f"测试集准确率: {test_accuracy:.4f}")
+    print(f"测试集整体准确率: {test_accuracy:.4f}")
     if test_masked_accuracy is not None:
         print(f"测试集掩码位置准确率: {test_masked_accuracy:.4f}")
     
