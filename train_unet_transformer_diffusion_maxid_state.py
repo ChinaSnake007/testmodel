@@ -76,7 +76,7 @@ def evaluate_model(model, val_loader, device):
     with torch.no_grad():
         pbar = tqdm(val_loader, desc="验证进度")
         for batch in pbar:
-            original_ids, masked_ids = [b.to(device) for b in batch]
+            original_ids, one_hot, masked_ids, mask = [b.to(device) for b in batch]
             
             # 生成预测
             predictions = model.sample(masked_ids)
@@ -112,9 +112,8 @@ def main():
     parser.add_argument('--train_ratio', type=float, default=0.8, help='训练集比例')
     parser.add_argument('--val_ratio', type=float, default=0.1, help='验证集比例')
     parser.add_argument('--test_ratio', type=float, default=0.1, help='测试集比例')
-    parser.add_argument('--num_epochs', type=int, default=50, help='训练迭代次数')
+    parser.add_argument('--num_epochs', type=int, default=10, help='训练迭代次数')
     parser.add_argument('--ch', type=int, default=64, help='UNet基础通道数')
-    parser.add_argument('--ch_mult', type=str, default='1,2,4,8', help='UNet通道数乘数，用逗号分隔')
     parser.add_argument('--num_res_blocks', type=int, default=2, help='残差块数量')
     parser.add_argument('--dropout', type=float, default=0.1, help='Dropout率')
     parser.add_argument('--learning_rate', type=float, default=1e-4, help='学习率')
@@ -137,21 +136,18 @@ def main():
         test_ratio=args.test_ratio,
     )
     
-    # 解析ch_mult参数
-    ch_mult = tuple(map(int, args.ch_mult.split(',')))
     
-    # 模型参数
+    # 模型参数    
     model_config = {
-        "num_ids": args.num_ids,
-        "seq_length": args.max_length,
-        "ch": args.ch,
-        "ch_mult": ch_mult,
-        "num_res_blocks": args.num_res_blocks,
-        "dropout": args.dropout,
-        "learning_rate": args.learning_rate,
-        "num_timesteps": args.num_timesteps
+        'num_ids': args.num_ids,
+        'seq_length': args.max_length,
+        'ch': args.ch,
+        'ch_mult': (1, 2, 4, 8),
+        'num_res_blocks': args.num_res_blocks,
+        'dropout': args.dropout,
+        'learning_rate': args.learning_rate,
+        'num_timesteps': args.num_timesteps
     }
-    
     # 创建模型
     model = UNetTransformerDiffusion(**model_config).to(device)
     
@@ -172,8 +168,9 @@ def main():
         epoch_losses = []
         
         # 训练一个epoch
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.num_epochs}"):
-            original_ids, x0, masked_ids, mask = [b.to(device) for b in batch]
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.num_epochs}")
+        for batch in pbar:
+            original_ids, one_hot, masked_ids, mask = [b.to(device) for b in batch]
 
             # 计算损失
             loss = model.training_step((original_ids, masked_ids), 0)
@@ -185,6 +182,9 @@ def main():
             
             # 优化器步进
             optimizer.step()
+            
+            # 更新进度条
+            pbar.set_postfix({'loss': f'{loss.item():.6f}'})
         
         # 记录当前epoch的平均损失
         avg_loss = np.mean(epoch_losses)
