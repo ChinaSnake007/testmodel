@@ -19,17 +19,14 @@ def generate_adjacency_matrix(id_count, ratio):
     # 计算需要设置为1的元素数量
     ones_count = int(non_diagonal_size * ratio)
     
-    # 获取所有非对角线位置的索引
-    non_diagonal_indices = []
-    for i in range(id_count):
-        for j in range(id_count):
-            if i != j:  # 排除对角线元素
-                non_diagonal_indices.append((i, j))
+    # 使用numpy的随机函数直接生成非对角线位置的索引
+    indices = np.random.choice(id_count * id_count, ones_count, replace=False)
+    rows = indices // id_count
+    cols = indices % id_count
     
-    # 随机选择位置设置为1
-    selected_indices = random.sample(non_diagonal_indices, ones_count)
-    for i, j in selected_indices:
-        matrix[i][j] = 1
+    # 过滤掉对角线元素
+    mask = rows != cols
+    matrix[rows[mask], cols[mask]] = 1
     
     return matrix
 
@@ -45,14 +42,15 @@ def generate_sequence(adj_matrix, seq_len):
     current_id = random.randint(1, id_count)
     sequence.append(current_id)
     
+    # 预计算每个ID可以连接的下一个ID列表
+    next_ids = {i+1: np.where(adj_matrix[i] == 1)[0] + 1 for i in range(id_count)}
+    
     for _ in range(seq_len - 1):
-        # 获取当前ID可以连接的所有可能的下一个ID
-        possible_next = [i+1 for i in range(id_count) if adj_matrix[current_id-1][i] == 1]
-        if not possible_next:
-            # 如果没有可用的下一个ID，随机选择一个
+        possible_next = next_ids[current_id]
+        if len(possible_next) == 0:
             current_id = random.randint(1, id_count)
         else:
-            current_id = random.choice(possible_next)
+            current_id = np.random.choice(possible_next)
         sequence.append(current_id)
     
     return sequence
@@ -71,11 +69,20 @@ def generate_sequences(id_count, ratio, seq_len, count):
     return adj_matrix, sequences
 
 if __name__ == "__main__":
-    # 示例使用
-    id_count = 50  # ID数量
-    ratio = 0.4   # 邻接矩阵中1的占比
-    seq_len = 20  # 序列长度
-    count = 300000     # 生成序列的数量
+    # 从命令行解析参数
+    import argparse
+    parser = argparse.ArgumentParser(description='生成序列数据')
+    parser.add_argument('--id_count', type=int, default=50, help='ID数量')
+    parser.add_argument('--ratio', type=float, default=0.2, help='邻接矩阵中1的占比')
+    parser.add_argument('--seq_len', type=int, default=20, help='序列长度')
+    parser.add_argument('--count', type=int, default=300000, help='生成序列的数量')
+    args = parser.parse_args()
+
+    # 获取参数
+    id_count = args.id_count
+    ratio = args.ratio
+    seq_len = args.seq_len
+    count = args.count
     
     adj_matrix, sequences = generate_sequences(id_count, ratio, seq_len, count)
     

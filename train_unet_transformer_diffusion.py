@@ -107,8 +107,8 @@ def main():
         num_ids=50,
         miss_ratio=0.3,
         train_ratio=0.8,
-        val_ratio=0.01,
-        test_ratio=0.19,
+        val_ratio=0.1,
+        test_ratio=0.1,
     )
     
     # 模型参数
@@ -166,8 +166,7 @@ def main():
         print(f"\nEpoch {epoch+1}/{num_epochs}")
         print(f"Average Loss: {avg_loss:.6f}")
         
-        # 每5个epoch评估一次模型，但跳过前10个epoch
-        if (epoch + 1) % 5 == 0:
+        if (epoch + 1) % 2 == 0:
             accuracy, masked_accuracy = evaluate_model(model, val_loader, device)
             accuracies.append(accuracy)
             if masked_accuracy is not None:

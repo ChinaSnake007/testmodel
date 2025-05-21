@@ -3,3 +3,5 @@ __pycache__
 checkpoints
 *.png
 *.jpg
+*.log
+1.log
