@@ -7,6 +7,10 @@ import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
+# 设置matplotlib字体和负号显示
+plt.rcParams['font.sans-serif'] = ['SimHei']  # 使用系统自带的黑体
+plt.rcParams['axes.unicode_minus'] = False  # 正确显示负号
+
 def calculate_accuracy(pred_ids, original_ids, mask=None):
     """计算准确率
     Args:

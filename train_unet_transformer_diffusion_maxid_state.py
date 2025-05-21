@@ -6,7 +6,13 @@ import os
 import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+import argparse
+# 设置matplotlib中文字体
+import matplotlib.pyplot as plt
 
+# 设置matplotlib字体和负号显示
+plt.rcParams['font.sans-serif'] = ['SimHei']  # 使用系统自带的黑体
+plt.rcParams['axes.unicode_minus'] = False  # 正确显示负号
 def calculate_accuracy(pred_ids, original_ids, mask=None):
     """计算准确率
     Args:
@@ -96,31 +102,54 @@ def evaluate_model(model, val_loader, device):
 
 def main():
     # 设置设备和优化选项
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--gpu', type=int, default=0, help='指定使用的GPU ID')
+    parser.add_argument('--csv_path', type=str, default='test_data/sequences_id50_ratio0.4_len20_count300000.csv', help='数据文件路径')
+    parser.add_argument('--batch_size', type=int, default=128, help='批次大小')
+    parser.add_argument('--max_length', type=int, default=20, help='序列最大长度')
+    parser.add_argument('--num_ids', type=int, default=50, help='ID数量')
+    parser.add_argument('--miss_ratio', type=float, default=0.3, help='缺失率')
+    parser.add_argument('--train_ratio', type=float, default=0.8, help='训练集比例')
+    parser.add_argument('--val_ratio', type=float, default=0.1, help='验证集比例')
+    parser.add_argument('--test_ratio', type=float, default=0.1, help='测试集比例')
+    parser.add_argument('--num_epochs', type=int, default=50, help='训练迭代次数')
+    parser.add_argument('--ch', type=int, default=64, help='UNet基础通道数')
+    parser.add_argument('--ch_mult', type=str, default='1,2,4,8', help='UNet通道数乘数，用逗号分隔')
+    parser.add_argument('--num_res_blocks', type=int, default=2, help='残差块数量')
+    parser.add_argument('--dropout', type=float, default=0.1, help='Dropout率')
+    parser.add_argument('--learning_rate', type=float, default=1e-4, help='学习率')
+    parser.add_argument('--num_timesteps', type=int, default=500, help='扩散步数')
+    args = parser.parse_args()
+    
+    device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
+    torch.cuda.set_device(args.gpu)  # 设置当前使用的GPU
     print(f"使用设备: {device}")
     
     # 创建数据加载器
     train_loader, val_loader, test_loader = create_dataloaders(
-        csv_path='test_data/sequences_id50_ratio0.4_len20_count300000.csv',
-        batch_size=128,
-        max_length=20,
-        num_ids=50,
-        miss_ratio=0.3,
-        train_ratio=0.8,
-        val_ratio=0.1,
-        test_ratio=0.1,
+        csv_path=args.csv_path,
+        batch_size=args.batch_size,
+        max_length=args.max_length,
+        num_ids=args.num_ids,
+        miss_ratio=args.miss_ratio,
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio,
+        test_ratio=args.test_ratio,
     )
+    
+    # 解析ch_mult参数
+    ch_mult = tuple(map(int, args.ch_mult.split(',')))
     
     # 模型参数
     model_config = {
-        "num_ids": 50,  # 根据你的数据集修改
-        "seq_length": 20,
-        "ch": 64,
-        "ch_mult": (1, 2, 4, 8),
-        "num_res_blocks": 2,
-        "dropout": 0.1,
-        "learning_rate": 1e-4,
-        "num_timesteps": 500
+        "num_ids": args.num_ids,
+        "seq_length": args.max_length,
+        "ch": args.ch,
+        "ch_mult": ch_mult,
+        "num_res_blocks": args.num_res_blocks,
+        "dropout": args.dropout,
+        "learning_rate": args.learning_rate,
+        "num_timesteps": args.num_timesteps
     }
     
     # 创建模型
@@ -138,14 +167,13 @@ def main():
     print("\n=== 开始训练 ===")
     
     # 每个epoch的训练循环
-    num_epochs = 50
-    for epoch in range(num_epochs):
+    for epoch in range(args.num_epochs):
         model.train()
         epoch_losses = []
         
         # 训练一个epoch
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}"):
-            original_ids, masked_ids = [b.to(device) for b in batch]
+        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.num_epochs}"):
+            original_ids, x0, masked_ids, mask = [b.to(device) for b in batch]
 
             # 计算损失
             loss = model.training_step((original_ids, masked_ids), 0)
@@ -163,10 +191,10 @@ def main():
         losses.append(avg_loss)
         
         # 打印训练损失
-        print(f"\nEpoch {epoch+1}/{num_epochs}")
+        print(f"\nEpoch {epoch+1}/{args.num_epochs}")
         print(f"Average Loss: {avg_loss:.6f}")
         
-        if (epoch + 1) % 2 == 0:
+        if (epoch + 1) % 5 == 0:
             accuracy, masked_accuracy = evaluate_model(model, val_loader, device)
             accuracies.append(accuracy)
             if masked_accuracy is not None:
@@ -175,14 +203,6 @@ def main():
             print(f"Accuracy: {accuracy:.4f}")
             if masked_accuracy is not None:
                 print(f"Masked Accuracy: {masked_accuracy:.4f}")
-            
-            # 绘制训练曲线
-            plot_training_curves(
-                losses, 
-                accuracies,
-                masked_accuracies if masked_accuracies else None,
-                save_path=f'training_curves_epoch_{epoch+1}.png'
-            )
     
     # 测试模型
     print("\n=== 模型测试 ===")
@@ -190,6 +210,16 @@ def main():
     print(f"测试集准确率: {test_accuracy:.4f}")
     if test_masked_accuracy is not None:
         print(f"测试集掩码位置准确率: {test_masked_accuracy:.4f}")
+    
+    # 绘制总的训练曲线
+    filename = f'training_curves_id{args.num_ids}_len{args.max_length}_miss{args.miss_ratio}_epochs{args.num_epochs}_batch{args.batch_size}_lr{args.learning_rate}.png'
+    plot_training_curves(
+        losses, 
+        accuracies,
+        masked_accuracies if masked_accuracies else None,
+        save_path=filename
+    )
+    print(f"\n训练曲线已保存至: {filename}")
 
 if __name__ == "__main__":
     main() 
