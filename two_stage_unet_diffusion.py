@@ -8,10 +8,11 @@ from tqdm import tqdm
 import math
 import random
 import torch.nn.functional as F
+
 """
-模型：两阶段Transformer结构
+模型：两阶段UNet结构
     第一阶段：PretrainIDEmbedding，做id的嵌入学习
-    第二阶段：TransformerDiffusion，
+    第二阶段：UNetDiffusion，使用UNet结构进行去噪
 输入：
     1. 原始ID嵌入
     2. 条件ID嵌入
@@ -20,6 +21,127 @@ import torch.nn.functional as F
     1. 预测ID
 """
 
+def get_timestep_embedding(timesteps, embedding_dim):
+    """时间步编码"""
+    assert len(timesteps.shape) == 1
+    half_dim = embedding_dim // 2
+    emb = math.log(10000) / (half_dim - 1)
+    emb = torch.exp(torch.arange(half_dim, dtype=torch.float32) * -emb)
+    emb = emb.to(device=timesteps.device)
+    emb = timesteps.float()[:, None] * emb[None, :]
+    emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
+    if embedding_dim % 2 == 1:  # zero pad
+        emb = F.pad(emb, (0, 1, 0, 0))
+    return emb
+
+def nonlinearity(x):
+    return x * torch.sigmoid(x)  # swish激活函数
+
+def Normalize(in_channels):
+    return torch.nn.GroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True)
+
+class Upsample(nn.Module):
+    def __init__(self, in_channels, with_conv=True):
+        super().__init__()
+        self.with_conv = with_conv
+        if self.with_conv:
+            self.conv = torch.nn.Conv1d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
+
+    def forward(self, x):
+        x = F.interpolate(x, scale_factor=2.0, mode="nearest")
+        if self.with_conv:
+            x = self.conv(x)
+        return x
+
+class Downsample(nn.Module):
+    def __init__(self, in_channels, with_conv=True):
+        super().__init__()
+        self.with_conv = with_conv
+        if self.with_conv:
+            self.conv = torch.nn.Conv1d(in_channels, in_channels, kernel_size=3, stride=2, padding=0)
+
+    def forward(self, x):
+        if self.with_conv:
+            pad = (1, 1)
+            x = F.pad(x, pad, mode="constant", value=0)
+            x = self.conv(x)
+        else:
+            x = F.avg_pool1d(x, kernel_size=2, stride=2)
+        return x
+
+class ResnetBlock(nn.Module):
+    def __init__(self, in_channels, out_channels=None, conv_shortcut=False, dropout=0.1, temb_channels=512):
+        super().__init__()
+        self.in_channels = in_channels
+        out_channels = in_channels if out_channels is None else out_channels
+        self.out_channels = out_channels
+        self.use_conv_shortcut = conv_shortcut
+
+        self.norm1 = Normalize(in_channels)
+        self.conv1 = torch.nn.Conv1d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
+        self.temb_proj = torch.nn.Linear(temb_channels, out_channels)
+        self.norm2 = Normalize(out_channels)
+        self.dropout = torch.nn.Dropout(dropout)
+        self.conv2 = torch.nn.Conv1d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
+        
+        if self.in_channels != self.out_channels:
+            if self.use_conv_shortcut:
+                self.conv_shortcut = torch.nn.Conv1d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
+            else:
+                self.nin_shortcut = torch.nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
+
+    def forward(self, x, temb):
+        h = x
+        h = self.norm1(h)
+        h = nonlinearity(h)
+        h = self.conv1(h)
+
+        h = h + self.temb_proj(nonlinearity(temb))[:, :, None]
+
+        h = self.norm2(h)
+        h = nonlinearity(h)
+        h = self.dropout(h)
+        h = self.conv2(h)
+
+        if self.in_channels != self.out_channels:
+            if self.use_conv_shortcut:
+                x = self.conv_shortcut(x)
+            else:
+                x = self.nin_shortcut(x)
+
+        return x + h
+
+class AttnBlock(nn.Module):
+    def __init__(self, in_channels):
+        super().__init__()
+        self.in_channels = in_channels
+
+        self.norm = Normalize(in_channels)
+        self.q = torch.nn.Conv1d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
+        self.k = torch.nn.Conv1d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
+        self.v = torch.nn.Conv1d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
+        self.proj_out = torch.nn.Conv1d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
+
+    def forward(self, x):
+        h_ = x
+        h_ = self.norm(h_)
+        q = self.q(h_)
+        k = self.k(h_)
+        v = self.v(h_)
+
+        b, c, w = q.shape
+        q = q.permute(0, 2, 1)  # b,w,c
+        w_ = torch.bmm(q, k)  # b,w,w
+        w_ = w_ * (int(c)**(-0.5))
+        w_ = F.softmax(w_, dim=2)
+
+        w_ = w_.permute(0, 2, 1)  # b,w,w
+        h_ = torch.bmm(v, w_)
+        h_ = h_.reshape(b, c, w)
+
+        h_ = self.proj_out(h_)
+
+        return x + h_
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model: int, max_len: int = 5000):
@@ -33,29 +155,6 @@ class PositionalEncoding(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x + self.pe[:x.size(0)]
-
-class TimeEmbedding(nn.Module):
-    def __init__(self, dim=256):
-        super().__init__()
-        assert dim % 2 == 0, "嵌入维度需要是偶数"
-        half_dim = dim // 2
-        emb = math.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, dtype=torch.float32) * -emb)
-        self.register_buffer('emb', emb)
-        
-        self.proj = nn.Sequential(
-            nn.Linear(dim, dim * 4),
-            nn.SiLU(),
-            nn.Linear(dim * 4, dim),
-            nn.SiLU(),
-            nn.Linear(dim, dim)
-        )
-    
-    def forward(self, t):
-        t = t.float() / self.emb.numel()
-        emb = t.unsqueeze(-1) * self.emb.unsqueeze(0)
-        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
-        return self.proj(emb)
 
 class PretrainIDEmbedding(pl.LightningModule):
     def __init__(self, num_ids: int, embedding_dim: int, temperature: float = 0.1):
@@ -249,143 +348,158 @@ class PretrainIDEmbedding(pl.LightningModule):
         optimizer = torch.optim.AdamW(self.parameters(), lr=1e-4, weight_decay=0.01)
         return optimizer
 
-class TransformerBlock(nn.Module):
-    def __init__(self, dim, num_heads, mlp_ratio=4.0, dropout=0.1, attention_dropout=0.1):
-        super().__init__()
-        self.norm1 = nn.LayerNorm(dim)
-        self.attn = nn.MultiheadAttention(dim, num_heads, dropout=attention_dropout, batch_first=True)
-        self.norm2 = nn.LayerNorm(dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, int(dim * mlp_ratio)),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(int(dim * mlp_ratio), dim),
-            nn.Dropout(dropout)
-        )
-        
-    def forward(self, x):
-        # Self-attention with residual
-        x = x + self.attn(self.norm1(x), self.norm1(x), self.norm1(x))[0]
-        # MLP with residual
-        x = x + self.mlp(self.norm2(x))
-        return x
-
-class CrossAttentionBlock(nn.Module):
-    def __init__(self, dim, num_heads, mlp_ratio=4.0, dropout=0.1, attention_dropout=0.1):
-        super().__init__()
-        self.norm1 = nn.LayerNorm(dim)
-        self.norm_cond = nn.LayerNorm(dim)
-        self.cross_attn = nn.MultiheadAttention(dim, num_heads, dropout=attention_dropout, batch_first=True)
-        self.norm2 = nn.LayerNorm(dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, int(dim * mlp_ratio)),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(int(dim * mlp_ratio), dim),
-            nn.Dropout(dropout)
-        )
-        
-    def forward(self, x, condition):
-        # Cross-attention with residual
-        x = x + self.cross_attn(self.norm1(x), self.norm_cond(condition), self.norm_cond(condition))[0]
-        # MLP with residual
-        x = x + self.mlp(self.norm2(x))
-        return x
-
-class TransformerDiffusion(nn.Module):
+class UNetDiffusion(nn.Module):
     def __init__(
         self,
         embedding_dim: int = 512,
-        num_heads: int = 8,
-        num_layers: int = 6,
-        mlp_ratio: float = 4.0,
+        ch: int = 64,
+        ch_mult: Tuple[int, ...] = (1, 2, 4, 8),
+        num_res_blocks: int = 2,
         dropout: float = 0.1,
-        attention_dropout: float = 0.1,
-        cross_attention_layers: int = 3,  # 交叉注意力层数
+        num_timesteps: int = 1000
     ):
         super().__init__()
         
-        self.time_embedding = TimeEmbedding(embedding_dim)
-        self.pos_encoder = PositionalEncoding(embedding_dim)
+        self.embedding_dim = embedding_dim
+        self.ch = ch
+        self.temb_ch = self.ch * 4
+        self.num_resolutions = len(ch_mult)
+        self.num_res_blocks = num_res_blocks
+        in_ch_mult = (1,) + tuple(ch_mult)
         
-        # 时间嵌入投影
-        self.time_proj = nn.Sequential(
-            nn.Linear(embedding_dim, embedding_dim * 2),
-            nn.GELU(),
-            nn.Linear(embedding_dim * 2, embedding_dim)
-        )
-        
-        # 自注意力层
-        self.self_attention_layers = nn.ModuleList([
-            TransformerBlock(
-                dim=embedding_dim,
-                num_heads=num_heads,
-                mlp_ratio=mlp_ratio,
-                dropout=dropout,
-                attention_dropout=attention_dropout
-            ) for _ in range(num_layers)
-        ])
-        
-        # 交叉注意力层
-        self.cross_attention_layers = nn.ModuleList([
-            CrossAttentionBlock(
-                dim=embedding_dim,
-                num_heads=num_heads,
-                mlp_ratio=mlp_ratio,
-                dropout=dropout,
-                attention_dropout=attention_dropout
-            ) for _ in range(cross_attention_layers)
-        ])
-        
-        # 输出投影
-        self.final_norm = nn.LayerNorm(embedding_dim)
-        self.noise_predictor = nn.Sequential(
-            nn.Linear(embedding_dim, embedding_dim * 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(embedding_dim * 2, embedding_dim)
-        )
-        
-    def forward(
-        self,
-        x: torch.Tensor,  # [B, seq_len, embedding_dim]
-        timesteps: torch.Tensor,  # [B]
-        condition: torch.Tensor,  # [B, seq_len, embedding_dim]
-    ) -> torch.Tensor:
         # 时间嵌入
-        t_emb = self.time_embedding(timesteps)  # [B, embedding_dim]
-        t_emb = self.time_proj(t_emb)  # [B, embedding_dim]
-        t_emb = t_emb.unsqueeze(1)  # [B, 1, embedding_dim]
-        t_emb = t_emb.expand(-1, x.shape[1], -1)  # [B, seq_len, embedding_dim]
+        self.temb = nn.ModuleDict({
+            'dense0': nn.Linear(self.ch, self.temb_ch),
+            'dense1': nn.Linear(self.temb_ch, self.temb_ch),
+        })
         
-        # 添加时间信息和位置编码
-        x = x + t_emb
-        x = x.transpose(0, 1)
-        x = self.pos_encoder(x)
-        x = x.transpose(0, 1)
+        # 输入投影
+        self.conv_in = nn.Conv1d(embedding_dim, self.ch, kernel_size=3, stride=1, padding=1)
         
-        # 自注意力处理
-        for layer in self.self_attention_layers:
-            x = layer(x)
+        # 下采样部分
+        self.down = nn.ModuleList()
+        curr_res = 32  # 假设序列长度为32
+        block_in = None
         
-        # 交叉注意力处理
-        for layer in self.cross_attention_layers:
-            x = layer(x, condition)
+        for i_level in range(self.num_resolutions):
+            block = nn.ModuleList()
+            attn = nn.ModuleList()
+            block_in = ch * in_ch_mult[i_level]
+            block_out = ch * ch_mult[i_level]
+            
+            for i_block in range(self.num_res_blocks):
+                block.append(ResnetBlock(
+                    in_channels=block_in,
+                    out_channels=block_out,
+                    temb_channels=self.temb_ch,
+                    dropout=dropout
+                ))
+                block_in = block_out
+                attn.append(AttnBlock(block_in))
+            
+            down = nn.Module()
+            down.block = block
+            down.attn = attn
+            if i_level != self.num_resolutions - 1:
+                down.downsample = Downsample(block_in, True)
+                curr_res = curr_res // 2
+            self.down.append(down)
         
-        # 最终输出
-        x = self.final_norm(x)
-        noise_pred = self.noise_predictor(x)
+        # 中间层
+        self.mid = nn.Module()
+        self.mid.block_1 = ResnetBlock(block_in, block_in, temb_channels=self.temb_ch)
+        self.mid.attn_1 = AttnBlock(block_in)
+        self.mid.block_2 = ResnetBlock(block_in, block_in, temb_channels=self.temb_ch)
         
-        return noise_pred
+        # 上采样部分
+        self.up = nn.ModuleList()
+        for i_level in reversed(range(self.num_resolutions)):
+            block = nn.ModuleList()
+            attn = nn.ModuleList()
+            block_out = ch * ch_mult[i_level]
+            skip_in = ch * ch_mult[i_level]
+            
+            for i_block in range(self.num_res_blocks + 1):
+                if i_block == self.num_res_blocks:
+                    skip_in = ch * in_ch_mult[i_level]
+                block.append(ResnetBlock(
+                    in_channels=block_in + skip_in,
+                    out_channels=block_out,
+                    temb_channels=self.temb_ch
+                ))
+                block_in = block_out
+                attn.append(AttnBlock(block_in))
+            
+            up = nn.Module()
+            up.block = block
+            up.attn = attn
+            if i_level != 0:
+                up.upsample = Upsample(block_in, True)
+                curr_res = curr_res * 2
+            self.up.insert(0, up)
+        
+        # 输出层
+        self.norm_out = Normalize(block_in)
+        self.conv_out = nn.Conv1d(block_in, embedding_dim, kernel_size=3, stride=1, padding=1)
+        
+        # 扩散调度器
+        self.noise_scheduler = DDPMScheduler(
+            num_train_timesteps=num_timesteps,
+            beta_schedule="squaredcos_cap_v2",
+            prediction_type="epsilon"
+        )
+    
+    def forward(self, x, t, condition):
+        # 时间编码
+        temb = get_timestep_embedding(t, self.ch)
+        temb = self.temb.dense0(temb)
+        temb = nonlinearity(temb)
+        temb = self.temb.dense1(temb)
+        
+        # 输入投影
+        x = x.transpose(1, 2)  # [B, embed_dim, seq_len]
+        x = self.conv_in(x)
+        
+        # 下采样路径
+        hs = [x]
+        
+        for i_level in range(self.num_resolutions):
+            for i_block in range(self.num_res_blocks):
+                h = self.down[i_level].block[i_block](hs[-1], temb)
+                h = self.down[i_level].attn[i_block](h)
+                hs.append(h)
+            if i_level != self.num_resolutions - 1:
+                hs.append(self.down[i_level].downsample(hs[-1]))
+        
+        # 中间层
+        h = hs[-1]
+        h = self.mid.block_1(h, temb)
+        h = self.mid.attn_1(h)
+        h = self.mid.block_2(h, temb)
+        
+        # 上采样路径
+        for i_level in reversed(range(self.num_resolutions)):
+            for i_block in range(self.num_res_blocks + 1):
+                h = self.up[i_level].block[i_block](
+                    torch.cat([h, hs.pop()], dim=1), temb)
+                h = self.up[i_level].attn[i_block](h)
+            if i_level != 0:
+                h = self.up[i_level].upsample(h)
+        
+        # 输出层
+        h = self.norm_out(h)
+        h = nonlinearity(h)
+        h = self.conv_out(h)
+        
+        return h.transpose(1, 2)  # [B, seq_len, embed_dim]
 
-class TwoStageTrajectoryDiffusion(pl.LightningModule):
+class TwoStageUNetDiffusion(pl.LightningModule):
     def __init__(
         self,
         num_ids: int = 3953,
         embedding_dim: int = 512,
-        num_layers: int = 6,
         learning_rate: float = 1e-4,
-        num_timesteps: int = 300,
+        num_timesteps: int = 1000,
         pretrained_embedding: Optional[PretrainIDEmbedding] = None
     ):
         super().__init__()
@@ -399,42 +513,18 @@ class TwoStageTrajectoryDiffusion(pl.LightningModule):
             for param in self.id_embedding.parameters():
                 param.requires_grad = False
         
-        # Transformer扩散模型
-        self.model = TransformerDiffusion(
+        # UNet扩散模型
+        self.model = UNetDiffusion(
             embedding_dim=embedding_dim,
-            num_heads=8,
-            num_layers=num_layers,
-            mlp_ratio=4.0,
+            ch=64,
+            ch_mult=(1, 2, 4, 8),
+            num_res_blocks=2,
             dropout=0.1,
-            attention_dropout=0.1,
-            cross_attention_layers=3
-        )
-        
-        # 移除简单的投影层，使用预训练模型的解码器
-        # self.proj_to_logits = nn.Linear(embedding_dim, num_ids + 2)
-        
-        # 扩散调度器
-        self.noise_scheduler = DDPMScheduler(
-            num_train_timesteps=num_timesteps,
-            beta_schedule="squaredcos_cap_v2",  # 使用余弦调度
-            beta_start=0.0001,  # 起始beta值
-            beta_end=0.02,  # 终点beta值
-            prediction_type="epsilon"
+            num_timesteps=num_timesteps
         )
         
         self.learning_rate = learning_rate
         self.num_timesteps = num_timesteps
-    
-    def setup(self, stage=None):
-        """在训练开始时将调度器的张量移动到正确的设备上"""
-        device = next(self.parameters()).device
-        # 将调度器的所有张量移动到设备上
-        for key in self.noise_scheduler.betas.__dict__.keys():
-            if torch.is_tensor(self.noise_scheduler.betas.__dict__[key]):
-                self.noise_scheduler.betas.__dict__[key] = self.noise_scheduler.betas.__dict__[key].to(device)
-        for key in self.noise_scheduler.alphas.__dict__.keys():
-            if torch.is_tensor(self.noise_scheduler.alphas.__dict__[key]):
-                self.noise_scheduler.alphas.__dict__[key] = self.noise_scheduler.alphas.__dict__[key].to(device)
     
     def forward(self, noisy_emb, timesteps, masked_ids, mask):
         # 获取条件嵌入
@@ -455,14 +545,13 @@ class TwoStageTrajectoryDiffusion(pl.LightningModule):
         # 对embedding加噪声
         noise = torch.randn_like(original_emb)
         timesteps = torch.randint(0, self.num_timesteps, (original_emb.shape[0],), device=original_emb.device)
-        noisy_emb = self.noise_scheduler.add_noise(original_emb, noise, timesteps)
+        noisy_emb = self.model.noise_scheduler.add_noise(original_emb, noise, timesteps)
 
         # 预测噪声
         noise_pred = self(noisy_emb, timesteps, masked_ids, mask)
 
         # 计算损失
         loss = F.mse_loss(noise_pred, noise)
-
 
         return loss
     
@@ -482,17 +571,13 @@ class TwoStageTrajectoryDiffusion(pl.LightningModule):
             device=device
         )
         
-        self.noise_scheduler.betas = self.noise_scheduler.betas.to(device)
-        self.noise_scheduler.alphas = self.noise_scheduler.alphas.to(device)
-        self.noise_scheduler.alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(device)
-        
-        for t in tqdm(self.noise_scheduler.timesteps):
+        for t in tqdm(self.model.noise_scheduler.timesteps):
             timesteps = torch.full((batch_size,), t, device=device, dtype=torch.float32)
             noise_pred = self(x, timesteps, masked_ids, mask)
-            scheduler_output = self.noise_scheduler.step(noise_pred, t, x)
+            scheduler_output = self.model.noise_scheduler.step(noise_pred, t, x)
             x = scheduler_output.prev_sample
             
-            if t == self.noise_scheduler.timesteps[-1]:
+            if t == self.model.noise_scheduler.timesteps[-1]:
                 logits = self.id_embedding.decode(x)
                 probs = torch.softmax(logits, dim=-1)
                 return probs, x  # 返回解码概率和还原的x0嵌入
@@ -595,17 +680,16 @@ def pretrain_embedding_model(
         print(f"Epoch [{epoch+1}/{num_epochs}], Average Loss: {avg_loss:.6f}")
         
         # 检查是否满足提前停止条件
-        if avg_loss < 0.1:
+        if avg_loss < 0.2:
             low_loss_count += 1
             if low_loss_count >= 10:
-                print(f"损失连续{low_loss_count}代小于0.1，提前停止训练!")
+                print(f"损失连续{low_loss_count}代小于0.2，提前停止训练!")
                 break
         else:
             low_loss_count = 0
     
     print("预训练完成！")
     return model
-
 
 def main():
     # 设置设备
@@ -638,10 +722,9 @@ def main():
     
     # 第二阶段：创建并训练扩散模型
     print("\n开始训练扩散模型...")
-    model = TwoStageTrajectoryDiffusion(
+    model = TwoStageUNetDiffusion(
         num_ids=num_ids,
         embedding_dim=embedding_dim,  # 使用相同的embedding_dim
-        num_layers=6,
         learning_rate=1e-4,
         num_timesteps=num_timesteps,
         pretrained_embedding=pretrained_model  # 传入预训练模型
@@ -687,6 +770,7 @@ def main():
             accuracy, mae = evaluate_model()
             accuracies.append(accuracy)
             maes.append(mae)
+    
     # 绘制loss、准确率和MAE曲线
     import matplotlib.pyplot as plt
     import matplotlib

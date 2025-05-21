@@ -30,8 +30,8 @@ class TrajectoryDataset(Dataset):
         original_ids[:traj_len] = torch.tensor(traj[:traj_len])
         
         # 创建one-hot编码
-        x = torch.zeros(self.max_length, self.num_ids + 2)  # +2 for padding token and missing token
-        x[torch.arange(traj_len), original_ids[:traj_len]] = 1  # 使用向量化操作
+        one_hot = torch.zeros(self.max_length, self.num_ids + 2)  # +2 for padding token and missing token
+        one_hot[torch.arange(traj_len), original_ids[:traj_len]] = 1  # 使用向量化操作
         
         # 创建mask（用于条件生成）
         mask = torch.zeros(self.max_length)
@@ -47,7 +47,7 @@ class TrajectoryDataset(Dataset):
         # 将缺失位置在mask中也标记为0
         mask[miss_positions] = 0
         
-        return original_ids, x, masked_ids, mask
+        return original_ids, one_hot, masked_ids, mask
 
 def create_dataloaders(
     csv_path: str,
@@ -142,11 +142,14 @@ def main():
     # 创建数据加载器
     print("初始化数据加载器...")
     train_loader, val_loader, test_loader = create_dataloaders(
-        csv_path='trajectories_sample.csv',
+        csv_path='test_data/sequences_id50_ratio0.4_len20_count300000.csv',
         batch_size=4,
-        max_length=32,
-        num_ids=3953,
-        miss_ratio=0.3
+        max_length=20,
+        num_ids=50,
+        miss_ratio=0.3,
+        train_ratio=0.8,
+        val_ratio=0.1,
+        test_ratio=0.1,
     )
     
     # 获取一个批次的数据
@@ -169,6 +172,8 @@ def main():
             print(masked_ids[0].numpy())
             print("\n掩码 (1=有效位置, 0=缺失或padding):")
             print(mask[0].numpy())
+            print("\nOne-hot编码:")
+            print(x[0].numpy())
             break
 
 if __name__ == "__main__":

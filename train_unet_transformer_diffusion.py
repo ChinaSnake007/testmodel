@@ -1,6 +1,6 @@
 import pytorch_lightning as pl
 from data_utils import create_dataloaders
-from normalized_transformer_diffusion import NormalizedTrajectoryTransformerDiffusion
+from unet_transformer_diffusion_maxid_state import UNetTransformerDiffusion
 import torch
 import os
 import numpy as np
@@ -70,13 +70,13 @@ def evaluate_model(model, val_loader, device):
     with torch.no_grad():
         pbar = tqdm(val_loader, desc="验证进度")
         for batch in pbar:
-            original_ids, x0, masked_ids, mask = [b.to(device) for b in batch]
+            original_ids, masked_ids = [b.to(device) for b in batch]
             
             # 生成预测
             predictions = model.sample(masked_ids)
             
             # 计算准确率
-            accuracy, masked_accuracy = calculate_accuracy(predictions, original_ids, mask)
+            accuracy, masked_accuracy = calculate_accuracy(predictions, original_ids)
             
             total_accuracy += accuracy
             if masked_accuracy is not None:
@@ -114,14 +114,17 @@ def main():
     # 模型参数
     model_config = {
         "num_ids": 50,  # 根据你的数据集修改
-        "embedding_dim": 256,
-        "num_layers": 6,
+        "seq_length": 20,
+        "ch": 64,
+        "ch_mult": (1, 2, 4, 8),
+        "num_res_blocks": 2,
+        "dropout": 0.1,
         "learning_rate": 1e-4,
         "num_timesteps": 500
     }
     
     # 创建模型
-    model = NormalizedTrajectoryTransformerDiffusion(**model_config).to(device)
+    model = UNetTransformerDiffusion(**model_config).to(device)
     
     # 创建优化器
     optimizer = torch.optim.AdamW(model.parameters(), lr=model_config["learning_rate"])
@@ -142,10 +145,10 @@ def main():
         
         # 训练一个epoch
         for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}"):
-            original_ids, x0, masked_ids, mask = [b.to(device) for b in batch]
+            original_ids, masked_ids = [b.to(device) for b in batch]
 
             # 计算损失
-            loss = model.training_step((original_ids, masked_ids, mask), 0)
+            loss = model.training_step((original_ids, masked_ids), 0)
             epoch_losses.append(loss.item())
             
             # 反向传播

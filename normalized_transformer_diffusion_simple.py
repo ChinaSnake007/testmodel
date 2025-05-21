@@ -81,15 +81,16 @@ class TransformerDiffusionBlock(nn.Module):
         x: torch.Tensor,
         combined_cond: torch.Tensor,
     ) -> torch.Tensor:
-        # Self attention
+        # Self attention - 对序列内部做注意力,捕获序列内部的依赖关系
         x2 = self.norm1(x)
         x = x + self.dropout1(self.self_attn(x2, x2, x2)[0])
         
-        # Cross attention with combined condition
+        # Cross attention - 将条件信息注入到序列中
+        # combined_cond包含时间步和ID条件信息,通过交叉注意力将这些条件信息融入到序列特征中
         x2 = self.norm2(x)
         x = x + self.dropout2(self.cross_attn(x2, combined_cond, combined_cond)[0])
         
-        # Feed forward
+        # Feed forward - 对每个位置独立做非线性变换
         x2 = self.norm3(x)
         x = x + self.dropout3(self.linear2(self.dropout(self.activation(self.linear1(x2)))))
         

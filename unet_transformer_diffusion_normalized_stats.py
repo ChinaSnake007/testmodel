@@ -4,18 +4,84 @@ import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
 from diffusers import DDPMScheduler
+import numpy as np
+from collections import defaultdict
+import matplotlib.pyplot as plt
+import os
+"""
+将x序列按照均值和方差进行归一化，之后进行加噪去噪处理
 
+条件按照位置，依次添加
 """
-模型：Unet结构+残差块和注意力
-将条件信息逐元素加入到x中
-输入：
-    1. 原始ID除以num_ids+1
-    2. 条件ID除以num_ids+1
-    3. 时间步长
-输出：
-    1. 预测噪声
-    2. 预测ID
-"""
+class DataStats:
+    def __init__(self):
+        self.total_sum = 0.0
+        self.total_squared_sum = 0.0
+        self.total_count = 0
+        self.mean = 0.0
+        self.var = 0.0
+    
+    def update(self, data):
+        """更新统计数据"""
+        # 确保数据是2D数组 [batch_size, seq_length]
+        if len(data.shape) == 1:
+            data = data.reshape(1, -1)
+        
+        # 计算所有ID的总和和平方和
+        for seq in data:
+            for id_val in seq:
+                id_val = float(id_val)
+                self.total_sum += id_val
+                self.total_squared_sum += id_val * id_val
+                self.total_count += 1
+        
+        # 计算均值和方差
+        if self.total_count > 0:
+            self.mean = self.total_sum / self.total_count
+            self.var = (self.total_squared_sum / self.total_count) - (self.mean * self.mean)
+    
+    def get_stats(self):
+        """获取统计信息"""
+        return {
+            'mean': self.mean,
+            'std': np.sqrt(self.var) if self.var > 0 else 0,
+            'total_count': self.total_count
+        }
+    
+    def normalize(self, data):
+        """归一化数据"""
+        # 确保数据是2D数组 [batch_size, seq_length]
+        if len(data.shape) == 1:
+            data = data.reshape(1, -1)
+            
+        normalized_data = []
+        std = np.sqrt(self.var) if self.var > 0 else 1.0
+        
+        for seq in data:
+            normalized_seq = []
+            for id_val in seq:
+                id_val = float(id_val)
+                if std > 0:
+                    normalized_val = (id_val - self.mean) / std
+                else:
+                    normalized_val = 0
+                normalized_seq.append(normalized_val)
+            normalized_data.append(normalized_seq)
+        return torch.tensor(normalized_data, dtype=torch.float32)
+    
+    def denormalize(self, normalized_data):
+        """反归一化数据"""
+        # 确保数据是2D数组 [batch_size, seq_length]
+        if len(normalized_data.shape) == 1:
+            normalized_data = normalized_data.reshape(1, -1)
+            
+        std = np.sqrt(self.var) if self.var > 0 else 1.0
+        
+        # 使用PyTorch的运算
+        denormalized = normalized_data * std + self.mean
+        denormalized = torch.round(denormalized)
+        return denormalized.long()
+
 def get_timestep_embedding(timesteps, embedding_dim):
     """时间步编码"""
     assert len(timesteps.shape) == 1
@@ -139,21 +205,37 @@ class AttnBlock(nn.Module):
         return x + h_
 
 class IDConditionModel(nn.Module):
-    def __init__(self, num_ids, embedding_dim):
+    def __init__(self, num_ids, embedding_dim, use_transformer=True):
         super().__init__()
         self.id_embedding = nn.Embedding(num_ids + 2, embedding_dim)  # +2 for padding
-        self.pos_encoder = nn.TransformerEncoderLayer(
-            d_model=embedding_dim,
-            nhead=8,
-            dim_feedforward=embedding_dim * 4,
-            batch_first=True
-        )
-        self.transformer = nn.TransformerEncoder(self.pos_encoder, num_layers=3)
+        self.use_transformer = use_transformer
+        
+        if use_transformer:
+            self.pos_encoder = nn.TransformerEncoderLayer(
+                d_model=embedding_dim,
+                nhead=8,
+                dim_feedforward=embedding_dim * 4,
+                batch_first=True
+            )
+            self.transformer = nn.TransformerEncoder(self.pos_encoder, num_layers=3)
+        else:
+            # 使用简单的线性层替代Transformer
+            self.linear_layers = nn.Sequential(
+                nn.Linear(embedding_dim, embedding_dim * 2),
+                nn.SiLU(),
+                nn.Linear(embedding_dim * 2, embedding_dim)
+            )
+            
         self.output_proj = nn.Linear(embedding_dim, embedding_dim)
 
     def forward(self, ids):
         x = self.id_embedding(ids)
-        x = self.transformer(x)
+        
+        if self.use_transformer:
+            x = self.transformer(x)
+        else:
+            x = self.linear_layers(x)
+            
         x = self.output_proj(x)
         return x.permute(0, 2, 1)  # [B, embed_dim, seq_len]
 
@@ -190,7 +272,7 @@ class UNetTransformerDiffusion(pl.LightningModule):
         })
         
         # 条件编码
-        self.cond_encoder = IDConditionModel(num_ids, self.ch * 4)
+        self.cond_encoder = IDConditionModel(num_ids, self.ch * 4, use_transformer=True)
         
         # 输入投影
         self.conv_in = nn.Conv1d(1, self.ch, kernel_size=3, stride=1, padding=1)
@@ -277,6 +359,7 @@ class UNetTransformerDiffusion(pl.LightningModule):
         
         # 条件编码
         cond_emb = self.cond_encoder(cond)
+        # 将条件信息依次加入序列中
         temb = temb + cond_emb.mean(dim=2)  # 添加条件信息
         
         # 下采样路径
@@ -312,11 +395,15 @@ class UNetTransformerDiffusion(pl.LightningModule):
         return h
     
     def normalize_ids(self, ids):
+        # 将ID归一化到[0,1]范围
         return ids.float() / (self.num_ids + 1)
     
     def denormalize_ids(self, normalized_ids):
+        # 从[0,1]范围恢复到原始ID
         scaled_ids = normalized_ids * (self.num_ids + 1)
+        # 对缩放后的ID值进行四舍五入,将连续值转换为离散的整数ID
         rounded_ids = torch.round(scaled_ids)
+        # 将四舍五入后的ID值转换为长整型,并限制在合法范围内(0到num_ids+1)
         return rounded_ids.long().clamp(0, self.num_ids + 1)
     
     def training_step(self, batch, batch_idx):
@@ -365,16 +452,22 @@ class UNetTransformerDiffusion(pl.LightningModule):
         return self.denormalize_ids(x.squeeze(1))
 
 def main():
+    # 创建保存图表的文件夹
+    current_file = os.path.basename(__file__)
+    folder_name = os.path.splitext(current_file)[0]
+    if not os.path.exists(folder_name):
+        os.makedirs(folder_name)
+    
     # 模型参数
     model_config = {
-        'num_ids': 25,
-        'seq_length': 32,
+        'num_ids': 20,
+        'seq_length': 16,
         'ch': 64,
         'ch_mult': (1, 2, 4, 8),
         'num_res_blocks': 2,
         'dropout': 0.1,
-        'learning_rate': 1e-4,
-        'num_timesteps': 1000
+        'learning_rate': 1e-2,
+        'num_timesteps': 500
     }
     
     # 训练参数
@@ -394,10 +487,39 @@ def main():
     batch_size = train_config['batch_size']
     seq_length = model_config['seq_length']
     original_ids = torch.randint(1, model_config['num_ids'] + 1, (batch_size, seq_length)).to(device)
-    masked_ids = original_ids.clone()  # 在实际应用中，这里应该是条件ID
+    masked_ids = original_ids.clone()
+    
+    # 创建数据统计对象
+    data_stats = DataStats()
+    
+    # 更新统计数据
+    data_stats.update(original_ids.cpu().numpy())
+    
+    # 打印统计信息
+    print("\n数据统计信息:")
+    stats = data_stats.get_stats()
+    print(f"总数据量: {stats['total_count']}")
+    print(f"均值: {stats['mean']:.2f}")
+    print(f"标准差: {stats['std']:.2f}")
+    
+    # 归一化数据
+    normalized_ids = data_stats.normalize(original_ids.cpu().numpy())
+    print("\n归一化后的数据示例:")
+    print(normalized_ids[0])
+    
+    # 反归一化数据
+    denormalized_ids = data_stats.denormalize(normalized_ids)
+    print("\n反归一化后的数据示例:")
+    print(denormalized_ids[0])
     
     # 训练循环
     optimizer = torch.optim.AdamW(model.parameters(), lr=model_config['learning_rate'])
+    
+    # 用于记录损失和准确率
+    losses = []
+    accuracies = []
+    acc_epochs = []  # 用于记录准确率对应的epoch
+    epochs = []
     
     print("\n开始训练:")
     for epoch in range(train_config['num_epochs']):
@@ -410,12 +532,18 @@ def main():
         # 计算损失
         loss = model.training_step(batch, epoch)
         
+        # 记录损失
+        losses.append(loss.item())
+        epochs.append(epoch + 1)
+        
         # 反向传播
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         
-        if (epoch + 1) % 50 == 0:
+        if not hasattr(model, 'best_accuracy'):
+            model.best_accuracy = 0.0
+        
+        if (epoch + 1) % 20 == 0:
             print(f"Epoch [{epoch+1}/{train_config['num_epochs']}], Loss: {loss.item():.6f}")
             
             # 生成样本
@@ -427,15 +555,56 @@ def main():
                 correct_count = (generated_ids == original_ids).sum().item()
                 total_ids = original_ids.numel()
                 accuracy = correct_count / total_ids
-                print(f"准确率: {accuracy:.4f}")
                 
-                # 打印样本对比
-                if (epoch + 1) % 200 == 0:
+                # 记录准确率和对应的epoch
+                accuracies.append(accuracy)
+                acc_epochs.append(epoch + 1)
+                
+                if accuracy > model.best_accuracy:
+                    model.best_accuracy = accuracy
+                print(f"当前准确率: {accuracy:.4f}, 最高准确率: {model.best_accuracy:.4f}")
+                
+                if (epoch + 1) % 20 == 0:
                     print("\n样本对比 (前3个序列):")
                     print("原始ID:")
                     print(original_ids[:3].cpu().numpy())
                     print("生成ID:")
                     print(generated_ids[:3].cpu().numpy())
+        
+        # 每200代更新一次图形
+        if (epoch + 1) % 200 == 0:
+            # 关闭之前的图形
+            plt.close('all')
+            
+            # 创建新的图形
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 12))
+            
+            # 绘制损失曲线
+            ax1.plot(epochs, losses, 'b-', label='训练损失')
+            ax1.set_title('训练损失曲线', fontsize=12)
+            ax1.set_xlabel('训练轮次', fontsize=10)
+            ax1.set_ylabel('损失值', fontsize=10)
+            ax1.grid(True)
+            ax1.legend(fontsize=10)
+            
+            # 绘制准确率曲线
+            if len(accuracies) > 0:
+                ax2.plot(acc_epochs, accuracies, 'r-', label='准确率')
+                ax2.set_title('训练准确率曲线', fontsize=12)
+                ax2.set_xlabel('训练轮次', fontsize=10)
+                ax2.set_ylabel('准确率', fontsize=10)
+                ax2.grid(True)
+                ax2.legend(fontsize=10)
+            
+            plt.tight_layout()
+            
+            # 保存图表到指定文件夹
+            save_path = os.path.join(folder_name, f'training_curves_epoch_{epoch+1}.png')
+            plt.savefig(save_path)
+            plt.show()
+    
+    print("\n训练完成！")
+    print(f"训练曲线已保存到文件夹: {folder_name}")
 
 if __name__ == "__main__":
     main() 

@@ -73,6 +73,12 @@ def main():
         miss_ratio=0.3
     )
     
+    # 获取原始ID数据
+    original_ids = []
+    for batch in train_loader:
+        original_ids.append(batch[0])  # 获取每个批次的原始ID
+    original_ids = torch.cat(original_ids, dim=0)  # 将所有批次的数据连接起来
+    
     # 模型参数
     model_config = {
         "num_ids": 3953,
@@ -89,7 +95,8 @@ def main():
         embedding_dim=model_config["embedding_dim"],
         num_epochs=50,
         batch_size=64,
-        device=device
+        device=device,
+        original_ids=original_ids  # 直接传入原始ID数据
     )
     
     # 第二阶段：训练扩散模型
