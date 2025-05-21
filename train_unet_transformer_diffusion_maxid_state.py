@@ -194,7 +194,7 @@ def main():
         print(f"\nEpoch {epoch+1}/{args.num_epochs}")
         print(f"Average Loss: {avg_loss:.6f}")
         
-        if (epoch + 1) % 1 == 0:
+        if (epoch + 1) % 5 == 0:
             accuracy, masked_accuracy = evaluate_model(model, val_loader, device)
             accuracies.append(accuracy)
             if masked_accuracy is not None:
