@@ -42,21 +42,21 @@ def plot_training_curves(losses, accuracies, masked_accuracies=None, save_path='
     
     # 绘制损失曲线
     plt.subplot(1, 2, 1)
-    plt.plot(losses, label='训练损失')
-    plt.title('训练损失曲线')
-    plt.xlabel('迭代次数')
-    plt.ylabel('损失值')
+    plt.plot(losses, label='Training Loss')
+    plt.title('Training Loss Curve')
+    plt.xlabel('Iterations')
+    plt.ylabel('Loss')
     plt.grid(True)
     plt.legend()
     
     # 绘制准确率曲线
     plt.subplot(1, 2, 2)
-    plt.plot(accuracies, label='总体准确率')
+    plt.plot(accuracies, label='Overall Accuracy')
     if masked_accuracies is not None:
-        plt.plot(masked_accuracies, label='掩码位置准确率')
-    plt.title('准确率曲线')
-    plt.xlabel('评估次数')
-    plt.ylabel('准确率')
+        plt.plot(masked_accuracies, label='Masked Position Accuracy')
+    plt.title('Accuracy Curve')
+    plt.xlabel('Evaluations')
+    plt.ylabel('Accuracy')
     plt.grid(True)
     plt.legend()
     
@@ -182,7 +182,7 @@ def main():
         print(f"\nEpoch {epoch+1}/{num_epochs}")
         print(f"Average Loss: {avg_loss:.6f}")
         
-        if (epoch + 1) % 5 == 0:
+        if (epoch + 1) % 1 == 0:
             accuracy, masked_accuracy = evaluate_model(model, val_loader, device)
             accuracies.append(accuracy)
             if masked_accuracy is not None:
